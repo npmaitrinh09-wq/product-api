@@ -1,0 +1,53 @@
+# Tên dự án Compose, giúp tách biệt với dự án phát triển
+name: product-api-prod
+
+services:
+  # ===== MongoDB cho môi trường triển khai =====
+  nammongodb-prod:
+    image: mongo:8
+    container_name: nammongodb-prod
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      APP_DB_NAME: ${APP_DB_NAME}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    # Không mở cổng 27017 ra ngoài: chỉ API trong cùng mạng mới truy cập được
+    volumes:
+      - nammongodb-prod-data:/data/db
+      - ./mongo-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - product-prod-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ===== Product API: image lấy từ Docker Hub =====
+  api-prod:
+    image: npmaitrinh/product-api:${APP_VERSION:-latest}
+    pull_policy: always
+    container_name: product-api-prod
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      MONGO_URI: mongodb://${APP_DB_USER}:${APP_DB_PASSWORD}@nammongodb-prod:27017/${APP_DB_NAME}?authSource=${APP_DB_NAME}
+    ports:
+      - "3001:3000"
+    depends_on:
+      nammongodb-prod:
+        condition: service_healthy
+    networks:
+      - product-prod-net
+    # Không khai báo healthcheck: dùng HEALTHCHECK có sẵn trong image
+
+networks:
+  product-prod-net:
+    name: product-prod-net
+
+volumes:
+  nammongodb-prod-data:
+    name: nammongodb-prod-data
