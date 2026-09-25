@@ -11,12 +11,17 @@ permissions:
   contents: read
 
 jobs:
+  # ================================================================
+  # JOB 1: GitHub Actions -> Docker Hub (chạy trên máy ảo GitHub)
+  # ================================================================
   deploy:
     name: Build va Push len Docker Hub
-    # Chỉ triển khai khi CI THÀNH CÔNG
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
 
     env:
       IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/product-api
@@ -112,10 +117,10 @@ jobs:
           docker rm -f verify-api verify-mongo || true
           docker network rm verify-net || true
 
-      - name: 9. Tom tat trien khai
+      - name: 9. Tom tat trien khai Docker Hub
         run: |
           {
-            echo "## Da trien khai len Docker Hub"
+            echo "## Da day image len Docker Hub"
             echo ""
             echo "| Tag | Lenh pull |"
             echo "|---|---|"
@@ -123,3 +128,102 @@ jobs:
             echo "| ${{ steps.meta.outputs.version }} | \`docker pull $IMAGE:${{ steps.meta.outputs.version }}\` |"
             echo "| ${{ steps.meta.outputs.sha }} | \`docker pull $IMAGE:${{ steps.meta.outputs.sha }}\` |"
           } >> $GITHUB_STEP_SUMMARY
+
+  # ================================================================
+  # JOB 2: Docker Hub -> Docker Engine local (chạy trên MÁY BẠN)
+  # ================================================================
+  deploy-local:
+    name: Trien khai len Docker Engine local
+    needs: deploy
+    runs-on: [self-hosted, local-docker]
+    timeout-minutes: 20
+
+    env:
+      MONGO_ROOT_USER: ${{ secrets.MONGO_ROOT_USER }}
+      MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
+      APP_DB_USER: ${{ secrets.APP_DB_USER }}
+      APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
+      APP_DB_NAME: productdb
+      APP_VERSION: ${{ needs.deploy.outputs.version }}
+
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: 1. Lay file cau hinh trien khai
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: 2. Kiem tra Docker Engine tren may local
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $v = docker version --format "{{.Server.Version}}"
+          if ($LASTEXITCODE -ne 0) { throw "Docker Desktop chua chay tren may local" }
+          "Docker Engine: $v"
+          if (-not $env:APP_VERSION) { throw "Khong nhan duoc phien ban tu job deploy" }
+          "Phien ban se trien khai: $env:APP_VERSION"
+
+      - name: 3. Ghi nho phien ban dang chay (de rollback)
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $old = docker inspect --format "{{.Config.Image}}" product-api-prod 2>$null
+          if ($LASTEXITCODE -ne 0 -or -not $old) { $old = "none" }
+          "Phien ban dang chay: $old"
+          Add-Content -Path $env:GITHUB_ENV -Value "OLD_IMAGE=$old"
+          exit 0
+
+      - name: 4. Pull image tu Docker Hub va trien khai
+        run: |
+          $ErrorActionPreference = 'Continue'
+          docker compose -f docker-compose-prod.yaml pull api-prod
+          if ($LASTEXITCODE -ne 0) { throw "Pull image tu Docker Hub that bai" }
+          docker compose -f docker-compose-prod.yaml up -d --wait --wait-timeout 180
+          if ($LASTEXITCODE -ne 0) { throw "Trien khai that bai hoac khong dat healthy" }
+          "Da trien khai phien ban $env:APP_VERSION"
+
+      - name: 5. Kiem tra sau trien khai
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $img = docker inspect --format "{{.Config.Image}}" product-api-prod
+          $health = docker inspect --format "{{.State.Health.Status}}" product-api-prod
+          "Image: $img"
+          "Health: $health"
+          if ($img -notlike "*:$env:APP_VERSION") { throw "FAIL - Container khong chay dung phien ban $env:APP_VERSION" }
+          if ($health -ne "healthy") { throw "FAIL - Container khong healthy" }
+
+          $root = Invoke-RestMethod -Uri http://localhost:3001/
+          "API bao phien ban: $($root.version)"
+          if ($root.version -ne $env:APP_VERSION) { throw "FAIL - API bao sai phien ban" }
+
+          $h = Invoke-RestMethod -Uri http://localhost:3001/health
+          if ($h.status -ne "ok") { throw "FAIL - /health khong ok" }
+
+          $list = @(Invoke-RestMethod -Uri http://localhost:3001/api/products)
+          "So san pham hien co: $($list.Count)"
+          "PASS - Trien khai local thanh cong: $img ($health)"
+
+      - name: 6. Rollback neu trien khai that bai
+        if: failure()
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if ($env:OLD_IMAGE -eq "none") { "Khong co phien ban cu de rollback"; exit 0 }
+          $env:APP_VERSION = $env:OLD_IMAGE.Split(':')[-1]
+          "ROLLBACK ve: $env:OLD_IMAGE"
+          docker compose -f docker-compose-prod.yaml up -d --wait --wait-timeout 180
+          exit 0
+
+      - name: 7. Don dep image khong con dung
+        if: success()
+        run: |
+          docker image prune -f
+          exit 0
+
+      - name: 8. Tom tat trien khai local
+        if: success()
+        run: |
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Da trien khai len Docker Engine local"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- Phien ban moi: $env:APP_VERSION"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- Phien ban truoc: $env:OLD_IMAGE"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- Kiem tra: http://localhost:3001"

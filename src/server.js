@@ -1,6 +1,6 @@
 require('dotenv').config({ quiet: true });
 const express = require('express');
-const mongoose = require('mongoose'); // ← MỚI
+const mongoose = require('mongoose');
 const connectDB = require('./config/db');
 const productRoutes = require('./routes/product.routes');
 
@@ -10,12 +10,15 @@ const PORT = process.env.PORT || 3000;
 // Đọc dữ liệu JSON trong body của request
 app.use(express.json());
 
-// Route kiểm tra nhanh
+// Route kiểm tra nhanh + hiển thị phiên bản đang chạy
 app.get('/', (req, res) => {
-  res.json({ message: 'Product API dang chay' });
+  res.json({
+    message: 'Product API dang chay',
+    version: process.env.APP_VERSION || 'dev',
+  });
 });
 
-// ← MỚI: Healthcheck - kiểm tra API và kết nối MongoDB
+// Healthcheck - kiểm tra API và kết nối MongoDB
 app.get('/health', (req, res) => {
   const dbConnected = mongoose.connection.readyState === 1;
   res.status(dbConnected ? 200 : 503).json({
