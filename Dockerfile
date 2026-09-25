@@ -19,8 +19,12 @@ ENV NODE_ENV=production
 # 7. Ghi chú cổng ứng dụng sử dụng
 EXPOSE 3000
 
-# 8. Chạy bằng user thường, không dùng root (an toàn hơn)
+# 8. Healthcheck đóng gói sẵn trong image (MỚI)
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
+    CMD wget -q --spider http://127.0.0.1:3000/health || exit 1
+
+# 9. Chạy bằng user thường, không dùng root (an toàn hơn)
 USER node
 
-# 9. Lệnh khởi động khi container chạy
+# 10. Lệnh khởi động khi container chạy
 CMD ["node", "src/server.js"]

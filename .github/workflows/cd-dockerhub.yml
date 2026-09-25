@@ -1,0 +1,125 @@
+name: Product API CD - Docker Hub
+
+# Chỉ chạy SAU KHI workflow CI Production chạy xong trên nhánh main
+on:
+  workflow_run:
+    workflows: ["Product API CI - Production"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build va Push len Docker Hub
+    # Chỉ triển khai khi CI THÀNH CÔNG
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/product-api
+
+    steps:
+      - name: 1. Lay ma nguon (dung commit da qua CI)
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: 2. Kiem tra Secrets Docker Hub
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DH_USER" ] || [ -z "$DH_TOKEN" ]; then
+            echo "THIEU SECRET DOCKERHUB_USERNAME hoac DOCKERHUB_TOKEN"
+            exit 1
+          fi
+          echo "Da co du secrets Docker Hub"
+
+      - name: 3. Tao cac tag phien ban
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)
+          echo "version=1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+          echo "sha=sha-$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "Phien ban: 1.0.${{ github.run_number }} | Commit: $SHORT_SHA"
+
+      - name: 4. Dang nhap Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 5. Chuan bi cong cu build
+        uses: docker/setup-buildx-action@v3
+
+      - name: 6. Build va Push image len Docker Hub
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.sha }}
+
+      - name: 7. Kiem tra sau trien khai - pull tu Docker Hub va healthcheck
+        run: |
+          TAG=$IMAGE:${{ steps.meta.outputs.version }}
+
+          echo "=== Pull image vua day len ==="
+          docker pull $TAG
+
+          echo "=== Chay MongoDB tam de kiem tra ==="
+          docker network create verify-net
+          docker run -d --name verify-mongo --network verify-net \
+            -e MONGO_INITDB_ROOT_USERNAME=verify \
+            -e MONGO_INITDB_ROOT_PASSWORD=verifyPass123 \
+            mongo:8
+          for i in $(seq 1 30); do
+            docker exec verify-mongo mongosh --quiet --eval "db.adminCommand('ping')" > /dev/null 2>&1 && break
+            sleep 2
+          done
+
+          echo "=== Chay image tu Docker Hub (dung HEALTHCHECK trong image) ==="
+          docker run -d --name verify-api --network verify-net -p 3000:3000 \
+            -e PORT=3000 \
+            -e MONGO_URI="mongodb://verify:verifyPass123@verify-mongo:27017/verifydb?authSource=admin" \
+            $TAG
+
+          STATUS=starting
+          for i in $(seq 1 30); do
+            STATUS=$(docker inspect -f '{{.State.Health.Status}}' verify-api)
+            echo "Lan $i: verify-api = $STATUS"
+            if [ "$STATUS" = "healthy" ]; then break; fi
+            sleep 3
+          done
+          if [ "$STATUS" != "healthy" ]; then
+            echo "FAIL - Image tren Docker Hub khong dat healthy"
+            docker logs verify-api
+            exit 1
+          fi
+
+          curl -sf http://localhost:3000/health
+          echo ""
+          echo "PASS - Image tren Docker Hub chay duoc va healthy"
+
+      - name: 8. Don dep
+        if: always()
+        run: |
+          docker rm -f verify-api verify-mongo || true
+          docker network rm verify-net || true
+
+      - name: 9. Tom tat trien khai
+        run: |
+          {
+            echo "## Da trien khai len Docker Hub"
+            echo ""
+            echo "| Tag | Lenh pull |"
+            echo "|---|---|"
+            echo "| latest | \`docker pull $IMAGE:latest\` |"
+            echo "| ${{ steps.meta.outputs.version }} | \`docker pull $IMAGE:${{ steps.meta.outputs.version }}\` |"
+            echo "| ${{ steps.meta.outputs.sha }} | \`docker pull $IMAGE:${{ steps.meta.outputs.sha }}\` |"
+          } >> $GITHUB_STEP_SUMMARY

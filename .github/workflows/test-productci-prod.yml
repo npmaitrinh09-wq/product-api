@@ -62,6 +62,49 @@ jobs:
           curl -sf http://localhost:3000/health
           echo ""
 
+      # ← MỚI: Bảo đảm healthcheck hoạt động đúng
+      - name: 6b. Dam bao healthcheck (healthy, phat hien su co, tu phuc hoi)
+        run: |
+          echo "=== Kiem tra 1: ca 2 dich vu phai healthy ==="
+          for c in nammongodb product-api-app; do
+            STATUS=$(docker inspect -f '{{.State.Health.Status}}' $c)
+            echo "$c: $STATUS"
+            if [ "$STATUS" != "healthy" ]; then
+              echo "FAIL - $c khong healthy"
+              exit 1
+            fi
+          done
+          echo "PASS - Ca 2 dich vu deu healthy"
+
+          echo "=== Kiem tra 2: image phai co HEALTHCHECK dong goi san ==="
+          HC=$(docker inspect -f '{{json .Config.Healthcheck}}' product-api:1.0)
+          echo "$HC"
+          if [ "$HC" = "null" ]; then
+            echo "FAIL - Image khong co HEALTHCHECK trong Dockerfile"
+            exit 1
+          fi
+          echo "PASS - Image co HEALTHCHECK"
+
+          echo "=== Kiem tra 3: tat MongoDB, API phai chuyen unhealthy ==="
+          docker compose stop nammongodb
+          for i in $(seq 1 20); do
+            STATUS=$(docker inspect -f '{{.State.Health.Status}}' product-api-app)
+            echo "Lan $i: product-api-app = $STATUS"
+            if [ "$STATUS" = "unhealthy" ]; then break; fi
+            sleep 3
+          done
+          if [ "$STATUS" != "unhealthy" ]; then
+            echo "FAIL - Healthcheck khong phat hien duoc su co"
+            exit 1
+          fi
+          echo "PASS - Healthcheck phat hien su co"
+
+          echo "=== Kiem tra 4: bat lai MongoDB, API phai tu phuc hoi ==="
+          docker compose start nammongodb
+          docker compose up -d --wait --wait-timeout 180
+          docker compose ps
+          echo "PASS - He thong tu phuc hoi ve healthy"
+
       - name: 7. Kiem tra phan quyen tai khoan ung dung
         run: |
           MONGO="docker compose exec -T nammongodb mongosh -u $APP_DB_USER -p $APP_DB_PASSWORD --authenticationDatabase $APP_DB_NAME --quiet"
