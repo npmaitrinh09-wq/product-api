@@ -1,0 +1,51 @@
+services:
+  # ===== Dịch vụ 1: MongoDB =====
+  nammongodb:
+    image: mongo:8
+    container_name: nammongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    ports:
+      - "27017:27017"
+    volumes:
+      - nammongodb-data:/data/db
+    networks:
+      - product-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ===== Dịch vụ 2: Product API =====
+  api:
+    build: .
+    image: product-api:1.0
+    container_name: product-api-app
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    ports:
+      - "3000:3000"
+    depends_on:
+      nammongodb:
+        condition: service_healthy
+    networks:
+      - product-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  product-net:
+    name: product-net
+
+volumes:
+  nammongodb-data:
+    name: nammongodb-data

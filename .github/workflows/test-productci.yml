@@ -1,0 +1,104 @@
+name: Product API CI
+
+# Khi nào workflow chạy
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Build va Test
+    runs-on: ubuntu-latest
+
+    # MongoDB tạm thời, chỉ dùng trong lúc test
+    services:
+      mongodb:
+        image: mongo:8
+        env:
+          MONGO_INITDB_ROOT_USERNAME: ciadmin
+          MONGO_INITDB_ROOT_PASSWORD: ciPassword123
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1})'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    # Biến môi trường thay cho file .env (file .env không có trên GitHub)
+    env:
+      PORT: 3000
+      MONGO_URI: mongodb://ciadmin:ciPassword123@localhost:27017/productdb_test?authSource=admin
+
+    steps:
+      - name: 1. Lay ma nguon
+        uses: actions/checkout@v5
+
+      - name: 2. Cai Node.js 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 3. Cai thu vien
+        run: npm ci
+
+      - name: 4. Kiem tra cu phap cac file JS
+        run: |
+          for f in $(find src -name "*.js"); do
+            echo "Kiem tra $f"
+            node --check "$f"
+          done
+
+      - name: 5. Khoi dong API va cho san sang
+        run: |
+          nohup node src/server.js > server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health; then
+              echo ""
+              echo "API da san sang sau $i giay"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API khong khoi dong duoc"
+          cat server.log
+          exit 1
+
+      - name: 6. Test cac API CRUD
+        run: |
+          API=http://localhost:3000/api/products
+          JSON="Content-Type: application/json"
+
+          check() {
+            name="$1"; expected="$2"; shift 2
+            code=$(curl -s -o response.json -w "%{http_code}" "$@")
+            if [ "$code" = "$expected" ]; then
+              echo "PASS - $name ($code)"
+            else
+              echo "FAIL - $name: mong doi $expected, nhan duoc $code"
+              cat response.json
+              exit 1
+            fi
+          }
+
+          check "Tao san pham"      201 -X POST $API -H "$JSON" -d '{"pid":1,"pname":"Laptop","price":1000,"quantity":5}'
+          check "Xem danh sach"     200 $API
+          check "Xem 1 san pham"    200 $API/1
+          check "Sua san pham"      200 -X PUT $API/1 -H "$JSON" -d '{"price":900}'
+          check "Trung pid"         409 -X POST $API -H "$JSON" -d '{"pid":1,"pname":"Trung","price":1,"quantity":1}'
+          check "Du lieu sai"       400 -X POST $API -H "$JSON" -d '{"pid":2,"price":-5}'
+          check "Khong tim thay"    404 $API/999
+          check "pid khong hop le"  400 $API/abc
+          check "Xoa san pham"      200 -X DELETE $API/1
+          check "Kiem tra da xoa"   404 $API/1
+
+      - name: 7. In log server
+        if: always()
+        run: cat server.log
+
+      - name: 8. Build thu Docker image
+        run: docker build -t product-api:ci .
