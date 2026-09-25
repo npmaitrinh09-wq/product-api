@@ -7,10 +7,14 @@ services:
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      APP_DB_NAME: ${APP_DB_NAME}          # ← MỚI
+      APP_DB_USER: ${APP_DB_USER}          # ← MỚI
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}  # ← MỚI
     ports:
       - "27017:27017"
     volumes:
       - nammongodb-data:/data/db
+      - ./mongo-init:/docker-entrypoint-initdb.d:ro   # ← MỚI
     networks:
       - product-net
     healthcheck:

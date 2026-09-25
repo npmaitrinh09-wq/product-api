@@ -1,0 +1,143 @@
+name: Product API CI - Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Quyền tối thiểu: workflow chỉ cần đọc code
+permissions:
+  contents: read
+
+# Nếu push liên tục, hủy lần chạy cũ, chỉ giữ lần mới nhất
+concurrency:
+  group: prod-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prod-test:
+    name: Test ban trien khai (Docker Compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Lấy cấu hình từ GitHub Secrets
+    env:
+      MONGO_ROOT_USER: ${{ secrets.MONGO_ROOT_USER }}
+      MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
+      APP_DB_USER: ${{ secrets.APP_DB_USER }}
+      APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
+      APP_DB_NAME: productdb
+
+    steps:
+      - name: 1. Lay ma nguon
+        uses: actions/checkout@v5
+
+      - name: 2. Kiem tra da khai bao du Secrets
+        run: |
+          for v in MONGO_ROOT_USER MONGO_ROOT_PASSWORD APP_DB_USER APP_DB_PASSWORD; do
+            if [ -z "${!v}" ]; then
+              echo "THIEU SECRET: $v"
+              exit 1
+            fi
+          done
+          echo "Da co du 4 secrets"
+
+      - name: 3. Tao file .env.docker cho API tu Secrets
+        run: |
+          cat > .env.docker <<EOF
+          PORT=3000
+          MONGO_URI=mongodb://${APP_DB_USER}:${APP_DB_PASSWORD}@nammongodb:27017/${APP_DB_NAME}?authSource=${APP_DB_NAME}
+          EOF
+          echo "Da tao .env.docker"
+
+      - name: 4. Kiem tra file docker-compose.yml
+        run: docker compose config --quiet
+
+      - name: 5. Build image va khoi dong he thong (cho healthy)
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: 6. Kiem tra trang thai he thong
+        run: |
+          docker compose ps
+          curl -sf http://localhost:3000/health
+          echo ""
+
+      - name: 7. Kiem tra phan quyen tai khoan ung dung
+        run: |
+          MONGO="docker compose exec -T nammongodb mongosh -u $APP_DB_USER -p $APP_DB_PASSWORD --authenticationDatabase $APP_DB_NAME --quiet"
+
+          $MONGO --eval "db.runCommand({ ping: 1 })" > /dev/null
+          echo "PASS - Tai khoan ung dung dang nhap duoc"
+
+          if $MONGO --eval "db.getSiblingDB('admin').getCollectionNames()" > /dev/null 2>&1; then
+            echo "FAIL - Tai khoan ung dung truy cap duoc database admin"
+            exit 1
+          fi
+          echo "PASS - Tai khoan ung dung KHONG truy cap duoc database admin"
+
+      - name: 8. Test day du cac API CRUD
+        run: |
+          API=http://localhost:3000/api/products
+          JSON="Content-Type: application/json"
+          LONG_NAME=$(printf 'A%.0s' $(seq 1 101))
+
+          check() {
+            name="$1"; expected="$2"; contains="$3"; shift 3
+            code=$(curl -s -o body.json -w "%{http_code}" "$@")
+            if [ "$code" != "$expected" ]; then
+              echo "FAIL - $name: mong doi $expected, nhan duoc $code"
+              cat body.json
+              exit 1
+            fi
+            if [ -n "$contains" ] && ! grep -qF -- "$contains" body.json; then
+              echo "FAIL - $name: noi dung khong chua '$contains'"
+              cat body.json
+              exit 1
+            fi
+            echo "PASS - $name ($code)"
+          }
+
+          check "01 Health"                    200 '"connected"' http://localhost:3000/health
+          check "02 Danh sach rong"            200 '[]'          $API
+          check "03 Tao san pham 1"            201 '"pid":1'     -X POST $API -H "$JSON" -d '{"pid":1,"pname":"Laptop Dell","price":15000000,"quantity":10}'
+          check "04 Tao san pham 2"            201 '"price":350000.5' -X POST $API -H "$JSON" -d '{"pid":2,"pname":"Chuot Logitech","price":350000.5,"quantity":50}'
+          check "05 Lam tron DECIMAL(10,2)"    201 '"price":100' -X POST $API -H "$JSON" -d '{"pid":3,"pname":"Cap sac","price":99.999,"quantity":5}'
+          check "06 Xem danh sach"             200 'Chuot Logitech' $API
+          check "07 Xem 1 san pham"            200 'Laptop Dell' $API/1
+          check "08 Sua gia"                   200 '"price":14500000' -X PUT $API/1 -H "$JSON" -d '{"price":14500000}'
+          check "09 Trung pid"                 409 ''            -X POST $API -H "$JSON" -d '{"pid":1,"pname":"Trung","price":1,"quantity":1}'
+          check "10 Du lieu sai"               400 '"errors"'    -X POST $API -H "$JSON" -d '{"pid":9,"price":-5,"quantity":1.5}'
+          check "11 pname qua 100 ky tu"       400 '100'         -X POST $API -H "$JSON" -d "{\"pid\":9,\"pname\":\"$LONG_NAME\",\"price\":1,\"quantity\":1}"
+          check "12 JSON sai cu phap"          400 ''            -X POST $API -H "$JSON" -d '{sai json'
+          check "13 Khong tim thay"            404 ''            $API/999
+          check "14 pid khong phai so"         400 ''            $API/abc
+          check "15 Duong dan khong ton tai"   404 ''            http://localhost:3000/api/khong-co
+          check "16 Xoa san pham 2"            200 '"pid":2'     -X DELETE $API/2
+          check "17 Kiem tra da xoa"           404 ''            $API/2
+
+      - name: 9. Kiem tra du lieu truc tiep trong MongoDB
+        run: |
+          COUNT=$(docker compose exec -T nammongodb mongosh -u $APP_DB_USER -p $APP_DB_PASSWORD --authenticationDatabase $APP_DB_NAME --quiet --eval "db.getSiblingDB('$APP_DB_NAME').products.countDocuments()")
+          echo "So san pham trong MongoDB: $COUNT"
+          if [ "$COUNT" != "2" ]; then
+            echo "FAIL - mong doi 2 san pham"
+            exit 1
+          fi
+          echo "PASS - Du lieu trong MongoDB khop voi cac thao tac API"
+
+      - name: 10. Kiem tra du lieu con sau khi khoi dong lai he thong
+        run: |
+          docker compose down
+          docker compose up -d --wait --wait-timeout 180
+          BODY=$(curl -s http://localhost:3000/api/products/1)
+          echo "$BODY"
+          echo "$BODY" | grep -qF '"price":14500000' || { echo "FAIL - mat du lieu sau khi khoi dong lai"; exit 1; }
+          echo "PASS - Du lieu van con sau khi khoi dong lai (volume hoat dong)"
+
+      - name: 11. In log khi co loi
+        if: failure()
+        run: docker compose logs
+
+      - name: 12. Don dep
+        if: always()
+        run: docker compose down -v
