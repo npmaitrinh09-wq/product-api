@@ -6,6 +6,9 @@ const Product = require('./models/product');
 const app = express();
 app.use(express.json());
 
+const morgan = require('morgan');
+app.use(morgan('dev'));
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
